@@ -43,11 +43,24 @@ def collect_activations(
         enc = lm.tokenize(chunk, system=system)
         out = lm.model(**enc, output_hidden_states=True)
         # hidden_states: tuple of (L+1) tensors, each (B, S, D).
-        # Average the last `positions` *real* tokens. With left padding the final
-        # `positions` columns are always real tokens for every prompt.
+        # Select the last `positions` real tokens for each prompt. Left padding
+        # puts short prompts near the end of the batch, but a prompt can still
+        # contain fewer tokens than the requested window.
         p = max(1, positions)
         hs = torch.stack(out.hidden_states, dim=0)  # (L+1, B, S, D)
-        sel = hs[:, :, -p:, :].mean(dim=2)  # (L+1, B, D)
+        attention_mask = enc.get("attention_mask")
+        if attention_mask is None:
+            sel = hs[:, :, -p:, :].mean(dim=2)
+        else:
+            selected = []
+            for batch_index, mask in enumerate(attention_mask):
+                real_positions = torch.nonzero(mask, as_tuple=True)[0]
+                if real_positions.numel() == 0:
+                    token_activations = hs[:, batch_index, -p:, :]
+                else:
+                    token_activations = hs[:, batch_index, real_positions[-p:], :]
+                selected.append(token_activations.mean(dim=1))
+            sel = torch.stack(selected, dim=1)  # (L+1, B, D)
         all_layers.append(sel.float().cpu())
         del out, hs
 
